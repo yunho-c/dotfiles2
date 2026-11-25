@@ -11,6 +11,9 @@ end
 
 local act = wezterm.action
 local macos = wezterm.target_triple:find('apple%-darwin') ~= nil
+local default_dark = 'Gruvbox dark, hard (base16)'
+local default_light = 'Gruvbox light, hard (base16)'
+config.color_scheme = default_dark
 local defaults = {
   brightness = 70, opacity = 60, saturation = 100,
   dark_tint = 10, light_tint = 90, blur = 25,
@@ -32,7 +35,25 @@ local function tint_key(is_light)
   return is_light and 'light_tint' or 'dark_tint'
 end
 
-local function background(path, is_light, settings)
+local builtin_schemes
+local function schemes()
+  if not builtin_schemes then builtin_schemes = wezterm.color.get_builtin_schemes() end
+  return builtin_schemes
+end
+
+local function theme_appearance(name)
+  -- Keep the original wallpaper tints for the two Gruvbox defaults.
+  if name == default_dark then return false, '#282c35' end
+  if name == default_light then return true, '#f9f5d7' end
+  local palette = schemes()[name]
+  if not palette or not palette.background then return false, '#282c35' end
+  local background_lightness = wezterm.color.parse(palette.background):laba()
+  local foreground_lightness = wezterm.color.parse(palette.foreground or 'white'):laba()
+  return background_lightness > foreground_lightness, palette.background
+end
+
+local function background(path, scheme, settings)
+  local is_light, tint_color = theme_appearance(scheme)
   local tint = tint_key(is_light)
   local layers = {}
   if path then
@@ -47,7 +68,7 @@ local function background(path, is_light, settings)
     })
   end
   table.insert(layers, {
-    source = { Color = is_light and '#f9f5d7' or '#282c35' },
+    source = { Color = tint_color },
     opacity = (settings[tint] or defaults[tint]) / 100,
     width = "100%",
     height = "100%",
@@ -55,11 +76,7 @@ local function background(path, is_light, settings)
   return layers
 end
 
-config.background = background(wallpaper_path, false, {})
-
--- 4. Set your desired color scheme
--- config.color_scheme = "Catppuccin Mocha"
-config.color_scheme = "Gruvbox dark, hard (base16)"
+config.background = background(wallpaper_path, default_dark, {})
 
 -- For good measure, let's add a font
 config.font = wezterm.font 'JetBrains Mono'
@@ -80,8 +97,6 @@ config.window_frame = {
         active_titlebar_bg = "none",
 }
 
-local light = 'Gruvbox light, hard (base16)'
-
 local function current_wallpaper(current)
   local layer = current.background[1]
   local file = layer and layer.source.File
@@ -97,23 +112,38 @@ local function settings_for(window)
   return wezterm.GLOBAL[state_key(window)] or {}
 end
 
-local function apply_background(window, overrides, path, is_light, settings)
+local function apply_background(window, overrides, path, scheme, settings)
   local custom_image = settings.brightness or settings.saturation or settings.opacity
-  if path == wallpaper_path and not is_light and not custom_image and not settings.dark_tint then
+  if path == wallpaper_path and scheme == default_dark and not custom_image and not settings.dark_tint then
     overrides.background = nil
   else
-    overrides.background = background(path, is_light, settings)
+    overrides.background = background(path, scheme, settings)
   end
   if macos then overrides.macos_window_background_blur = settings.blur end
   window:set_config_overrides(overrides)
 end
 
-wezterm.on('toggle-theme', function(window)
+local function switch_theme(window, scheme)
   local current = window:effective_config()
-  local is_light = current.color_scheme ~= light
   local overrides = window:get_config_overrides() or {}
-  overrides.color_scheme = is_light and light or nil
-  apply_background(window, overrides, current_wallpaper(current), is_light, settings_for(window))
+  local settings = settings_for(window)
+  local pair = settings.themes or {}
+  if scheme then
+    local mode = theme_appearance(scheme) and 'light' or 'dark'
+    pair[mode] = scheme
+    settings.themes = pair
+    wezterm.GLOBAL[state_key(window)] = settings
+  elseif theme_appearance(current.color_scheme) then
+    scheme = pair.dark or default_dark
+  else
+    scheme = pair.light or default_light
+  end
+  overrides.color_scheme = scheme ~= default_dark and scheme or nil
+  apply_background(window, overrides, current_wallpaper(current), scheme, settings)
+end
+
+wezterm.on('toggle-theme', function(window)
+  switch_theme(window)
 end)
 
 local controls = {
@@ -145,7 +175,7 @@ end
 
 wezterm.on('window-config-reloaded', function(window, pane)
   if not settings_for(window).editing or window:active_key_table() == 'adjust_background' then return end
-  local is_light = window:effective_config().color_scheme == light
+  local is_light = theme_appearance(window:effective_config().color_scheme)
   local settings = settings_for(window)
   if settings.editing then preview(window, pane, settings, is_light) end
 end)
@@ -157,7 +187,7 @@ local function step(delta)
     local settings = settings_for(window)
     local control = controls[settings.editing]
     if not control then return end
-    local is_light = current.color_scheme == light
+    local is_light = theme_appearance(current.color_scheme)
     local key = control_key(control, is_light)
     local value = math.max(0, math.min(control.max, (settings[key] or defaults[key]) + delta))
     if value == defaults[key] then
@@ -166,7 +196,7 @@ local function step(delta)
       settings[key] = value
     end
     wezterm.GLOBAL[state_key(window)] = settings
-    apply_background(window, overrides, current_wallpaper(current), is_light, settings)
+    apply_background(window, overrides, current_wallpaper(current), current.color_scheme, settings)
     preview(window, pane, settings, is_light)
   end)
 end
@@ -195,10 +225,10 @@ local select_control = wezterm.action_callback(function(window, pane, id)
   if not id then return end
   local overrides = window:get_config_overrides() or {}
   local current = window:effective_config()
-  local is_light = current.color_scheme == light
+  local is_light = theme_appearance(current.color_scheme)
   local settings = settings_for(window)
   if id == 'reset' then
-    settings = {}
+    settings = { themes = settings.themes }
   elseif id == 'frosted' then
     settings.blur = 45
     settings.opacity = 15
@@ -213,14 +243,14 @@ local select_control = wezterm.action_callback(function(window, pane, id)
     return
   end
   wezterm.GLOBAL[state_key(window)] = settings
-  apply_background(window, overrides, current_wallpaper(current), is_light, settings)
+  apply_background(window, overrides, current_wallpaper(current), current.color_scheme, settings)
 end)
 
 local function show_controls(window, pane)
   local current = window:effective_config()
   local settings = settings_for(window)
   local has_image = current_wallpaper(current) ~= nil
-  local is_light = current.color_scheme == light
+  local is_light = theme_appearance(current.color_scheme)
   local choices = {}
   for i, control in ipairs(controls) do
     if (has_image or not control.image) and (macos or control.key ~= 'blur') then
@@ -234,13 +264,65 @@ local function show_controls(window, pane)
   }, pane)
 end
 
+local featured_themes = {
+  default_dark, default_light,
+  'Catppuccin Mocha', 'Catppuccin Latte',
+  'Tokyo Night', 'Tokyo Night Day',
+  'Rosé Pine (Gogh)', 'Rosé Pine Dawn (Gogh)',
+}
+
+local show_themes
+local select_theme = wezterm.action_callback(function(window, pane, name)
+  if name == 'browse-all' then
+    show_themes(window, pane, true)
+  elseif name then
+    switch_theme(window, name)
+  end
+end)
+
+show_themes = function(window, pane, browse_all)
+  local palettes = schemes()
+  local names = featured_themes
+  if browse_all then
+    names = {}
+    for name in pairs(palettes) do table.insert(names, name) end
+    table.sort(names)
+  end
+  local current = window:effective_config().color_scheme
+  local choices = {}
+  for _, name in ipairs(names) do
+    local palette = palettes[name]
+    if palette then
+      local label = name == current and (name .. ' (current)') or name
+      if palette.background and palette.foreground and palette.ansi then
+        label = wezterm.format {
+          { Text = label .. '  ' },
+          { Background = { Color = palette.background } },
+          { Foreground = { Color = palette.foreground } }, { Text = ' Aa ' },
+          { Foreground = { Color = palette.ansi[2] } }, { Text = '●' },
+          { Foreground = { Color = palette.ansi[3] } }, { Text = '●' },
+          { Foreground = { Color = palette.ansi[5] } }, { Text = '● ' },
+        }
+      end
+      table.insert(choices, { id = name, label = label })
+    end
+  end
+  if not browse_all then table.insert(choices, { id = 'browse-all', label = 'Browse all themes…' }) end
+  window:perform_action(act.InputSelector {
+    title = 'Color theme', choices = choices, action = select_theme,
+    fuzzy = browse_all, fuzzy_description = 'Find a color theme: ',
+  }, pane)
+end
+
 local apply_wallpaper = wezterm.action_callback(function(window, pane, path)
   if path == 'adjust' then
     show_controls(window, pane)
+  elseif path == 'themes' then
+    show_themes(window, pane, false)
   elseif path then
     local overrides = window:get_config_overrides() or {}
-    local is_light = window:effective_config().color_scheme == light
-    apply_background(window, overrides, path, is_light, settings_for(window))
+    local scheme = window:effective_config().color_scheme
+    apply_background(window, overrides, path, scheme, settings_for(window))
   end
 end)
 
@@ -257,19 +339,30 @@ wezterm.on('choose-wallpaper', function(window, pane)
   local files = wezterm.glob('**/*', wallpaper_dir)
   table.sort(files)
   local choices = {}
+  local other_wallpapers = {}
   for _, file in ipairs(files) do
     local name = file:lower()
     if name:match('%.jpe?g$') or name:match('%.png$') or name:match('%.webp$') then
       local path = wallpaper_dir .. '/' .. file
       local label = wallpaper_names[file] or file
-      if path == current then label = label .. ' (current)' end
+      if path == current then
+        label = label .. ' (current)'
+      else
+        table.insert(other_wallpapers, path)
+      end
       table.insert(choices, { id = path, label = label })
     end
   end
   local empty_hint = #choices == 0 and 'Add JPG, PNG, or WebP images to ~/Wallpaper, or adjust the background.' or nil
+  local can_shuffle = #choices > 1
   table.insert(choices, { id = 'adjust', label = 'Adjust background…' })
+  table.insert(choices, { id = 'themes', label = 'Color theme…' })
+  if can_shuffle then
+    local next_wallpaper = other_wallpapers[math.random(#other_wallpapers)]
+    table.insert(choices, { id = next_wallpaper, label = 'Shuffle wallpaper' })
+  end
   window:perform_action(wezterm.action.InputSelector {
-    title = 'Choose wallpaper',
+    title = 'Appearance',
     description = empty_hint,
     choices = choices,
     action = apply_wallpaper,
