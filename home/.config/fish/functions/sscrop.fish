@@ -1,20 +1,31 @@
-function sscrop --description 'Crop PNG screenshots and save black-backed 4:4:4 JPEGs with jpegli'
+function sscrop --description 'Crop PNG screenshots and save black-backed JPEGs with jpegli'
     argparse h/help 'q/quality=' -- $argv; or return 2
-    set -l usage 'Usage: sscrop [-q 1..100] INPUT.png [INPUT.png ...]' \
-        '       sscrop [-q 1..100] INPUT.png OUTPUT.jpg'
+    set -l usage 'Usage: sscrop [-q high|mid|1..100] INPUT.png [INPUT.png ...]' \
+        '       sscrop [-q high|mid|1..100] INPUT.png OUTPUT.jpg'
     if set -q _flag_help
         printf '%s\n' $usage
-        echo 'Saves each screenshot as "<name> (cropped).jpg" at quality 96 by default.'
+        echo 'high (default) uses Q96 at 4:4:4. mid uses Q70 at 4:2:0. Numeric qualities use 4:4:4.'
+        echo 'Saves each screenshot as "<name> (cropped).jpg".'
         return 0
     end
     if not set -q argv[1]
         printf '%s\n' $usage >&2
         return 2
     end
-    set -q _flag_quality; or set -l _flag_quality 96
-    if not string match -qr '^(100|[1-9][0-9]?)$' -- "$_flag_quality"
-        echo 'sscrop: quality must be an integer from 1 to 100' >&2
-        return 2
+    set -q _flag_quality; or set -l _flag_quality high
+    set -l quality "$_flag_quality"
+    set -l sampling 444
+    switch "$quality"
+        case high
+            set quality 96
+        case mid
+            set quality 70
+            set sampling 420
+        case '*'
+            if not string match -qr '^(100|[1-9][0-9]?)$' -- "$quality"
+                echo 'sscrop: quality must be high, mid, or an integer from 1 to 100' >&2
+                return 2
+            end
     end
 
     set -l encoder (command -s cjpegli)
@@ -27,19 +38,19 @@ function sscrop --description 'Crop PNG screenshots and save black-backed 4:4:4 
     end
 
     if test (count $argv) -eq 2; and string match -qri '\.jpe?g$' -- "$argv[2]"
-        __sscrop_one "$argv[1]" "$argv[2]" "$_flag_quality" "$encoder"
+        __sscrop_one "$argv[1]" "$argv[2]" "$quality" "$sampling" "$encoder"
         return $status
     end
 
     set -l result 0
     for src in $argv
         set -l output (path change-extension '' -- "$src")' (cropped).jpg'
-        __sscrop_one "$src" "$output" "$_flag_quality" "$encoder"; or set result 1
+        __sscrop_one "$src" "$output" "$quality" "$sampling" "$encoder"; or set result 1
     end
     return $result
 end
 
-function __sscrop_one --argument-names src output quality encoder
+function __sscrop_one --argument-names src output quality sampling encoder
     set -l input (path resolve -- "$src")
     if not test -f "$input"
         echo "sscrop: could not find $src" >&2
@@ -63,7 +74,7 @@ function __sscrop_one --argument-names src output quality encoder
     or return 1
     command magick "png:$input" +repage -crop "$bounds" +repage -background black -alpha remove -alpha off \
         -define png:color-type=2 -define png:compression-level=1 png:- \
-        | "$encoder" - "$temp" -q "$quality" --chroma_subsampling 444 --quiet
+        | "$encoder" - "$temp" -q "$quality" --chroma_subsampling "$sampling" --quiet
     set -l pipeline_status $pipestatus
     if test "$pipeline_status[1]" -ne 0; or test "$pipeline_status[2]" -ne 0
         command rm -- "$temp"
