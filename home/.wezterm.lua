@@ -16,7 +16,7 @@ local default_light = 'Gruvbox light, hard (base16)'
 config.color_scheme = default_dark
 local defaults = {
   brightness = 70, opacity = 60, saturation = 100,
-  dark_tint = 10, light_tint = 90, blur = 25,
+  dark_tint = 10, light_tint = 90, blur = 25, desktop_dim = 45,
 }
 config.macos_window_background_blur = defaults.blur
 config.window_background_opacity = 0.9
@@ -56,6 +56,13 @@ local function background(path, scheme, settings)
   local is_light, tint_color = theme_appearance(scheme)
   local tint = tint_key(is_light)
   local layers = {}
+  local desktop_dim = settings.desktop_dim or defaults.desktop_dim
+  if desktop_dim > 0 then
+    table.insert(layers, {
+      source = { Color = '#000000' }, opacity = desktop_dim / 100,
+      width = '100%', height = '100%',
+    })
+  end
   if path then
     table.insert(layers, {
       source = { File = path },
@@ -98,9 +105,10 @@ config.window_frame = {
 }
 
 local function current_wallpaper(current)
-  local layer = current.background[1]
-  local file = layer and layer.source.File
-  return type(file) == 'table' and file.path or file
+  for _, layer in ipairs(current.background) do
+    local file = layer.source.File
+    if file then return type(file) == 'table' and file.path or file end
+  end
 end
 
 -- Each GUI window keeps its adjustments across config reloads.
@@ -114,7 +122,8 @@ end
 
 local function apply_background(window, overrides, path, scheme, settings)
   local custom_image = settings.brightness or settings.saturation or settings.opacity
-  if path == wallpaper_path and scheme == default_dark and not custom_image and not settings.dark_tint then
+  local custom_background = custom_image or settings.dark_tint or settings.desktop_dim
+  if path == wallpaper_path and scheme == default_dark and not custom_background then
     overrides.background = nil
   else
     overrides.background = background(path, scheme, settings)
@@ -152,6 +161,7 @@ local controls = {
   { key = 'saturation', label = 'Wallpaper saturation', max = 200, image = true },
   { key = 'tint', label = 'Theme tint strength', max = 100 },
   { key = 'blur', label = 'Desktop blur', max = 100 },
+  { key = 'desktop_dim', label = 'Dim desktop behind window', max = 100 },
 }
 
 local function control_key(control, is_light)
