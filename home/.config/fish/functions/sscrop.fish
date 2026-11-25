@@ -1,10 +1,11 @@
 function sscrop --description 'Crop PNG screenshots and save black-backed JPEGs with jpegli'
     argparse h/help 'q/quality=' -- $argv; or return 2
-    set -l usage 'Usage: sscrop [-q high|mid|1..100] INPUT.png [INPUT.png ...]' \
-        '       sscrop [-q high|mid|1..100] INPUT.png OUTPUT.jpg'
+    set -l usage 'Usage: sscrop [-q high|mid|low|1..100] INPUT.png [INPUT.png ...]' \
+        '       sscrop [-q high|mid|low|1..100] INPUT.png OUTPUT.jpg'
     if set -q _flag_help
         printf '%s\n' $usage
-        echo 'high (default) uses Q96 at 4:4:4. mid uses Q70 at 4:2:0. Numeric qualities use 4:4:4.'
+        echo 'high (default) uses Q96 at 4:4:4. mid uses Q70 at 4:2:0. low uses Q45 at 4:2:0.'
+        echo 'Numeric qualities use 4:4:4.'
         echo 'Saves each screenshot as "<name> (cropped).jpg".'
         return 0
     end
@@ -21,9 +22,12 @@ function sscrop --description 'Crop PNG screenshots and save black-backed JPEGs 
         case mid
             set quality 70
             set sampling 420
+        case low
+            set quality 45
+            set sampling 420
         case '*'
             if not string match -qr '^(100|[1-9][0-9]?)$' -- "$quality"
-                echo 'sscrop: quality must be high, mid, or an integer from 1 to 100' >&2
+                echo 'sscrop: quality must be high, mid, low, or an integer from 1 to 100' >&2
                 return 2
             end
     end
