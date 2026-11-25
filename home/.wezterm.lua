@@ -9,13 +9,13 @@ if wezterm.config_builder then
   config = wezterm.config_builder()
 end
 
--- 1. Enable the macOS native background blur (Acrylic/Vibrancy effect)
--- A value of 20-30 is usually a good starting point.
-config.macos_window_background_blur = 25
-
--- 2. Set the OVERALL window opacity. This is crucial.
--- This makes the entire window semi-transparent, allowing you to see the
--- blurred desktop/windows behind it.
+local act = wezterm.action
+local macos = wezterm.target_triple:find('apple%-darwin') ~= nil
+local defaults = {
+  brightness = 70, opacity = 60, saturation = 100,
+  dark_tint = 10, light_tint = 90, blur = 25,
+}
+config.macos_window_background_blur = defaults.blur
 config.window_background_opacity = 0.9
 
 -- Add the wallpaper layer when the image is available on this Mac.
@@ -28,26 +28,34 @@ else
   wallpaper_path = nil
 end
 
-local function background(path, is_light)
+local function tint_key(is_light)
+  return is_light and 'light_tint' or 'dark_tint'
+end
+
+local function background(path, is_light, settings)
+  local tint = tint_key(is_light)
   local layers = {}
   if path then
     table.insert(layers, {
       source = { File = path },
-      opacity = 0.60,
+      opacity = (settings.opacity or defaults.opacity) / 100,
       height = "Cover",
-      hsb = { hue = 1.0, saturation = 1.0, brightness = 0.7 },
+      hsb = {
+        saturation = (settings.saturation or defaults.saturation) / 100,
+        brightness = (settings.brightness or defaults.brightness) / 100,
+      },
     })
   end
   table.insert(layers, {
     source = { Color = is_light and '#f9f5d7' or '#282c35' },
-    opacity = is_light and 0.90 or 0.10,
+    opacity = (settings[tint] or defaults[tint]) / 100,
     width = "100%",
     height = "100%",
   })
   return layers
 end
 
-config.background = background(wallpaper_path, false)
+config.background = background(wallpaper_path, false, {})
 
 -- 4. Set your desired color scheme
 -- config.color_scheme = "Catppuccin Mocha"
@@ -80,12 +88,24 @@ local function current_wallpaper(current)
   return type(file) == 'table' and file.path or file
 end
 
-local function set_background(overrides, path, is_light)
-  if path == wallpaper_path and not is_light then
+-- Each GUI window keeps its adjustments across config reloads.
+local function state_key(window)
+  return 'background-settings-' .. window:window_id()
+end
+
+local function settings_for(window)
+  return wezterm.GLOBAL[state_key(window)] or {}
+end
+
+local function apply_background(window, overrides, path, is_light, settings)
+  local custom_image = settings.brightness or settings.saturation or settings.opacity
+  if path == wallpaper_path and not is_light and not custom_image and not settings.dark_tint then
     overrides.background = nil
   else
-    overrides.background = background(path, is_light)
+    overrides.background = background(path, is_light, settings)
   end
+  if macos then overrides.macos_window_background_blur = settings.blur end
+  window:set_config_overrides(overrides)
 end
 
 wezterm.on('toggle-theme', function(window)
@@ -93,15 +113,134 @@ wezterm.on('toggle-theme', function(window)
   local is_light = current.color_scheme ~= light
   local overrides = window:get_config_overrides() or {}
   overrides.color_scheme = is_light and light or nil
-  set_background(overrides, current_wallpaper(current), is_light)
+  apply_background(window, overrides, current_wallpaper(current), is_light, settings_for(window))
+end)
+
+local controls = {
+  { key = 'brightness', label = 'Wallpaper brightness', max = 150, image = true },
+  { key = 'opacity', label = 'Wallpaper opacity', max = 100, image = true },
+  { key = 'saturation', label = 'Wallpaper saturation', max = 200, image = true },
+  { key = 'tint', label = 'Theme tint strength', max = 100 },
+  { key = 'blur', label = 'Desktop blur', max = 100 },
+}
+
+local function control_key(control, is_light)
+  return control.key == 'tint' and tint_key(is_light) or control.key
+end
+
+local function control_label(control, settings, is_light)
+  local key = control_key(control, is_light)
+  local unit = key == 'blur' and '' or '%'
+  return control.label .. '  ' .. (settings[key] or defaults[key]) .. unit
+end
+
+local function preview(window, pane, settings, is_light)
+  local label = control_label(controls[settings.editing], settings, is_light)
+  window:set_left_status('  ' .. label .. '    ← / → adjust    Esc done   ')
+  -- Applying overrides clears the active key table on WezTerm 20240203.
+  window:perform_action(act.ActivateKeyTable {
+    name = 'adjust_background', one_shot = false, replace_current = true, prevent_fallback = true,
+  }, pane)
+end
+
+wezterm.on('window-config-reloaded', function(window, pane)
+  if not settings_for(window).editing or window:active_key_table() == 'adjust_background' then return end
+  local is_light = window:effective_config().color_scheme == light
+  local settings = settings_for(window)
+  if settings.editing then preview(window, pane, settings, is_light) end
+end)
+
+local function step(delta)
+  return wezterm.action_callback(function(window, pane)
+    local current = window:effective_config()
+    local overrides = window:get_config_overrides() or {}
+    local settings = settings_for(window)
+    local control = controls[settings.editing]
+    if not control then return end
+    local is_light = current.color_scheme == light
+    local key = control_key(control, is_light)
+    local value = math.max(0, math.min(control.max, (settings[key] or defaults[key]) + delta))
+    if value == defaults[key] then
+      settings[key] = nil
+    else
+      settings[key] = value
+    end
+    wezterm.GLOBAL[state_key(window)] = settings
+    apply_background(window, overrides, current_wallpaper(current), is_light, settings)
+    preview(window, pane, settings, is_light)
+  end)
+end
+
+local finish = wezterm.action_callback(function(window, pane)
+  local overrides = window:get_config_overrides() or {}
+  local settings = settings_for(window)
+  overrides.hide_tab_bar_if_only_one_tab = settings.previous_hide
+  settings.editing, settings.previous_hide = nil, nil
+  wezterm.GLOBAL[state_key(window)] = settings
+  window:set_left_status('')
+  window:perform_action(act.PopKeyTable, pane)
   window:set_config_overrides(overrides)
 end)
 
-local apply_wallpaper = wezterm.action_callback(function(window, _, path)
-  if path then
-    local overrides = window:get_config_overrides() or {}
-    set_background(overrides, path, window:effective_config().color_scheme == light)
+config.key_tables = {
+  adjust_background = {
+    { key = 'LeftArrow', action = step(-5) },
+    { key = 'RightArrow', action = step(5) },
+    { key = 'Escape', action = finish },
+    { key = 'Enter', action = finish },
+  },
+}
+
+local select_control = wezterm.action_callback(function(window, pane, id)
+  if not id then return end
+  local overrides = window:get_config_overrides() or {}
+  local current = window:effective_config()
+  local is_light = current.color_scheme == light
+  local settings = settings_for(window)
+  if id == 'reset' then
+    settings = {}
+  elseif id == 'frosted' then
+    settings.blur = 45
+    settings.opacity = 15
+    settings[tint_key(is_light)] = is_light and 45 or 35
+  else
+    settings.editing = tonumber(id)
+    settings.previous_hide = overrides.hide_tab_bar_if_only_one_tab
+    overrides.hide_tab_bar_if_only_one_tab = false
+    wezterm.GLOBAL[state_key(window)] = settings
     window:set_config_overrides(overrides)
+    preview(window, pane, settings, is_light)
+    return
+  end
+  wezterm.GLOBAL[state_key(window)] = settings
+  apply_background(window, overrides, current_wallpaper(current), is_light, settings)
+end)
+
+local function show_controls(window, pane)
+  local current = window:effective_config()
+  local settings = settings_for(window)
+  local has_image = current_wallpaper(current) ~= nil
+  local is_light = current.color_scheme == light
+  local choices = {}
+  for i, control in ipairs(controls) do
+    if (has_image or not control.image) and (macos or control.key ~= 'blur') then
+      table.insert(choices, { id = tostring(i), label = control_label(control, settings, is_light) })
+    end
+  end
+  if macos then table.insert(choices, { id = 'frosted', label = 'Frosted glass preset' }) end
+  table.insert(choices, { id = 'reset', label = 'Reset adjustments to defaults' })
+  window:perform_action(act.InputSelector {
+    title = 'Adjust background', choices = choices, action = select_control,
+  }, pane)
+end
+
+local apply_wallpaper = wezterm.action_callback(function(window, pane, path)
+  if path == 'adjust' then
+    show_controls(window, pane)
+  elseif path then
+    local overrides = window:get_config_overrides() or {}
+    local is_light = window:effective_config().color_scheme == light
+    apply_background(window, overrides, path, is_light, settings_for(window))
   end
 end)
 
@@ -127,12 +266,11 @@ wezterm.on('choose-wallpaper', function(window, pane)
       table.insert(choices, { id = path, label = label })
     end
   end
-  if #choices == 0 then
-    window:toast_notification('WezTerm', 'Add a JPG, PNG, or WebP image to ' .. wallpaper_dir, nil, 4000)
-    return
-  end
+  local empty_hint = #choices == 0 and 'Add JPG, PNG, or WebP images to ~/Wallpaper, or adjust the background.' or nil
+  table.insert(choices, { id = 'adjust', label = 'Adjust background…' })
   window:perform_action(wezterm.action.InputSelector {
     title = 'Choose wallpaper',
+    description = empty_hint,
     choices = choices,
     action = apply_wallpaper,
   }, pane)
